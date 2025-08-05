@@ -1,0 +1,97 @@
+import torch
+
+class Config:
+    def __init__(self):
+        # === Models ===
+        self.policy_model_name = "Qwen/Qwen3-1.7B-Base"
+        self.reward_model_name = "lvwerra/distilbert-imdb"
+
+        # SFT adapters (LoRA) de la care pornești PPO
+        self.lora_from_sft_dir = "./models/sft_imdb_qlora_qwen"
+        # alias pentru compatibilitate cu codul principal
+        self.sft_dir = self.lora_from_sft_dir
+
+        # reluare PPO dintr-un director cu adapters + value_head.pt (opțional)
+        self.resume_dir = None
+
+        # device pentru reward model (implicit același cu policy)
+        self.device = ("cuda" if torch.cuda.is_available()
+                       else "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
+                       else "cpu")
+        # self.reward_device = self.device
+        self.reward_device = "cpu"
+
+        # value head dim (pentru PPO)
+        self.value_hidden_dim = 512
+
+        # === PPO / RLHF terms ===
+        self.value_loss_weight = 0.3
+        self.entropy_weight = 0.01  # puțin mai mic decât 0.02
+        self.clip_epsilon = 0.15
+        self.clip_epsilon_final = 0.05  # scheduling liniar pe parcursul epocilor PPO
+
+        # coeficient pentru penalizarea față de modelul de referință
+        # (se aplică pe |Δlogp| mediu per token)
+        self.target_kl = 0.05
+        self.kl_coef = 0.2
+        self.kl_adapt_rate = 1.5
+        self.kl_window = 50
+        self.max_kl_coef = 1.0
+        self.min_kl_coef = 1e-4
+        self.kl_stop_factor = 1.5  # early-stop epocă PPO dacă |Δ| depășește factor * target
+
+        # Value clipping
+        self.value_clip_range = 0.3
+
+        # === Train (batching) ===
+        self.n_epochs = 6
+        self.lr = 5e-6
+        self.batch_size = 8
+        self.microbatch_size = 4
+        self.accum_steps = 2
+        self.ppo_epochs = 4
+        self.warmup_steps = 500
+
+        # === Generation ===
+        self.max_new_tokens = 128
+        self.top_p = 0.9
+        self.temperature = 0.5
+        self.repetition_penalty = 1.1
+
+        # === Lengths ===
+        self.policy_max_length = 512
+        self.reward_max_length = 512
+
+        # === Data ===
+        self.prompt_ratio_range = (0.45, 0.7)
+        self.split = "train[:10%]"
+        self.shuffle = True
+        self.num_workers = 1
+        self.seed = 42
+
+        # === Logging / saving ===
+        self.log_every = 10
+        self.log_interval = self.log_every
+        self.save_every = 5
+        self.log_dir = "runs/ppo_qwen3"
+        self.save_dir = "rl_imdb_qlora_qwen"  # corectat (qlora)
+
+        # === PPO advanced hyperparameters ===
+        self.gamma = 0.99
+        self.lambda_gae = 0.95
+        self.target_entropy = -1.5  # încurajează entropia mai mică (răspunsuri mai coerente)
+        self.entropy_adapt_lr = 1e-4        # learning rate pentru adaptarea coef. de entropie
+        self.min_entropy_coef = 0.0         # limită inferioară pentru coef. de entropie
+        self.max_entropy_coef = 0.1         # limită superioară pentru coef. de entropie
+
+        # === Reward shaping extras (folosite în PPOAgent.compute_sentiment_reward) ===
+        self.use_margin_reward = True      # dacă True: sigmoid(logit_pos - logit_neg)
+        self.add_length_bonus = True
+        self.min_words_bonus = 6
+        self.length_bonus = 0.05
+        self.diversity_coef = 0.1         # bonus de diversitate (bigram overlap)
+
+        # === Replay buffer & micro-batching pe număr de tokeni ===
+        self.buffer_size = 100              # mărimea bufferului de replay
+        self.replay_batch_size = 16         # câte mostre tragi pentru off-policy update
+        self.token_microbatch_size = 8000   # ținta de tokeni / micro-batch
