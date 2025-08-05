@@ -7,11 +7,12 @@ from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from _ppo.config import Config
-from _ppo.PolicyValueNN import PPOQLoRAWithValueHead  # adapta modulul tău la Qwen
+from _ppo.PolicyValueNN import PPOQLoRAWithValueHead  # adapt modulul tău la Qwen
+
 
 # ========= CONFIG =========
 config = Config()
-# Asigură-te că ai în config un atribut policy_model_name, ex: "Qwen/Qwen3-1.7B"
+# Asigură-te că ai în config un atribut policy_model_name și calea către modelul PPO antrenat
 
 # PROMPTS de test user
 PROMPTS_USER = [
@@ -21,55 +22,47 @@ PROMPTS_USER = [
     "This film was so bad that I couldn't even finish it,",
 ]
 
-# ========= MODELE POLICY/Baseline (Qwen) =========
-# Tokenizer Qwen
+# ========= MODELE POLICY / BASELINE =========
+# Tokenizer pentru policy și baseline (Qwen)
 tok = AutoTokenizer.from_pretrained(config.policy_model_name)
-tok.pad_token = tok.eos_token
+tok = tok if tok.pad_token else tok.add_special_tokens({'pad_token': tok.eos_token})
 tok.padding_side = "left"
 
-# Policy cu Value Head
-policy_model = PPOQLoRAWithValueHead(
-    model_name=config.policy_model_name,
-    value_hidden_dim=config.value_hidden_dim,
+# Încarcă checkpoint-ul PPO antrenat
+policy_model = PPOQLoRAWithValueHead.from_pretrained(
+    getattr(config, 'resume_dir', './models/ppo_imdb_qlora_qwen_best_iter2'),
+    device_map="auto",
     use_gradient_checkpointing=False,
-    use_cache=True
+    use_cache=True,
+    value_hidden_dim=getattr(config, "value_hidden_dim", 512),
+
 )
-policy_model = policy_model.from_pretrained("./models/ppo_imdb_qlora_qwen_best_iter2")
 policy_model.to(config.device).eval()
 
-# Baseline Qwen standard
+# Baseline Qwen standard (fără value head)
 baseline_model = AutoModelForCausalLM.from_pretrained(config.policy_model_name)
 baseline_model.to(config.device).eval()
 
-# ========= REWARD MODEL: distilbert-imdb =========
+# ========= REWARD MODEL =========
 reward_model = AutoModelForSequenceClassification.from_pretrained(config.reward_model_name)
+reward_tokenizer = AutoTokenizer.from_pretrained(config.reward_model_name)
 reward_model.to(config.device).eval()
-reward_tok = AutoTokenizer.from_pretrained(config.reward_model_name)
 
-# Clase distilbert-imdb
-id2label = getattr(reward_model.config, "id2label", {0:"NEGATIVE", 1:"POSITIVE"})
-inv = {v.lower(): k for k, v in id2label.items()}
-POS_IDX = inv.get("positive", 1)
-NEG_IDX = inv.get("negative", 0)
-
-# Timing / Performance storage
-perf_stats = {
-    'ppo_gen_times': [],
-    'baseline_gen_times': [],
-    'gpu_mem_peak': []
-}
+# Măsurare performanță
+def reset_stats():
+    return {'ppo_gen_times': [], 'baseline_gen_times': [], 'gpu_mem_peak': []}
+perf_stats = reset_stats()
 
 @torch.inference_mode()
-def generate_and_time(model, tokenizer, prompt_texts):
+def generate_and_time(model, tokenizer, prompt):
     inputs = tokenizer(
-        prompt_texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=config.policy_max_length,
+        [prompt], return_tensors="pt", padding=True, truncation=True,
+        max_length=config.policy_max_length
     ).to(config.device)
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
+    # Reset memorie și sincronizare
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
     start = time.time()
     out = model.generate(
         **inputs,
@@ -80,82 +73,87 @@ def generate_and_time(model, tokenizer, prompt_texts):
         pad_token_id=tokenizer.pad_token_id,
         return_dict_in_generate=True,
     )
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated() / 1024**2
+    else:
+        peak = 0.0
     end = time.time()
-    gen_time = end - start
-    peak_mem = torch.cuda.max_memory_allocated() / 1024**2
-    perf_stats['gpu_mem_peak'].append(peak_mem)
-    perf_stats['ppo_gen_times'].append(gen_time) if isinstance(model, PPOQLoRAWithValueHead) else perf_stats['baseline_gen_times'].append(gen_time)
-
-    seqs = out.sequences
-    prompt_lens = inputs['attention_mask'].sum(dim=1)
-    completions = []
-    for i in range(seqs.size(0)):
-        gen_only_ids = seqs[i, int(prompt_lens[i].item()):]
-        completions.append(tokenizer.decode(gen_only_ids, skip_special_tokens=True))
-    return completions[0]
+    duration = end - start
+    # Stocare în statistici
+    if isinstance(model, PPOQLoRAWithValueHead):
+        perf_stats['ppo_gen_times'].append(duration)
+    else:
+        perf_stats['baseline_gen_times'].append(duration)
+    perf_stats['gpu_mem_peak'].append(peak)
+    # Extrage completarea
+    seq = out.sequences[0]
+    prompt_len = inputs['attention_mask'].sum().item()
+    completion_ids = seq[prompt_len:]
+    return tokenizer.decode(completion_ids, skip_special_tokens=True)
 
 @torch.inference_mode()
-def reward_scores_imdb(texts, use_margin=False):
-    inp = reward_tok(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=config.reward_max_length,
+def compute_reward(text):
+    inputs = reward_tokenizer([text], return_tensors="pt",
+        padding=True, truncation=True, max_length=config.reward_max_length
     ).to(config.device)
-    logits = reward_model(**inp).logits
-    if use_margin:
-        margin = logits[:, POS_IDX] - logits[:, NEG_IDX]
-        return torch.sigmoid(margin).cpu().tolist()
+    logits = reward_model(**inputs).logits
     probs = F.softmax(logits, dim=-1)
-    return probs[:, POS_IDX].cpu().tolist()
+    # index pentru eticheta pozitivă
+    pos_idx = getattr(reward_model.config, 'id2label', {0:'NEGATIVE', 1:'POSITIVE'})
+    # asumăm poziția 1 pentru "POSITIVE"
+    return probs[:,1].item()
 
-# ========= Evaluare =========
+# ========= Evaluează =========
 ppo_rewards, base_rewards = [], []
-for prompt in tqdm(PROMPTS_USER, desc="Evaluating Qwen Performance"):
-    # Policy generate + time
-    ppo_comp = generate_and_time(policy_model, tok, [prompt])
-    # Baseline generate + time
-    base_comp = generate_and_time(baseline_model, tok, [prompt])
-
-    # Reward
-    ppo_r  = reward_scores_imdb([ppo_comp])[0]
-    base_r = reward_scores_imdb([base_comp])[0]
-    ppo_rewards.append(ppo_r)
-    base_rewards.append(base_r)
-
-    tqdm.write(f"→ Prompt: {prompt}")
-    tqdm.write(f"   Policy:   {ppo_comp[:100]}... | Reward: {ppo_r:.3f} | Gen Time: {perf_stats['ppo_gen_times'][-1]:.3f}s | GPU Peak: {perf_stats['gpu_mem_peak'][-1]:.1f}MB")
-    tqdm.write(f"   Baseline: {base_comp[:100]}... | Reward: {base_r:.3f} | Gen Time: {perf_stats['baseline_gen_times'][-1]:.3f}s")
+for prompt in tqdm(PROMPTS_USER, desc="Evaluating Qwen PPO vs Baseline"):
+    comp_ppo = generate_and_time(policy_model, tok, prompt)
+    comp_base = generate_and_time(baseline_model, tok, prompt)
+    r_ppo = compute_reward(comp_ppo)
+    r_base = compute_reward(comp_base)
+    ppo_rewards.append(r_ppo)
+    base_rewards.append(r_base)
+    tqdm.write(f"Prompt: {prompt}")
+    tqdm.write(f"  PPO  → {comp_ppo[:100]}... | Reward: {r_ppo:.3f} | Time: {perf_stats['ppo_gen_times'][-1]:.3f}s | Mem: {perf_stats['gpu_mem_peak'][-1]:.1f}MB")
+    tqdm.write(f"  Base → {comp_base[:100]}... | Reward: {r_base:.3f} | Time: {perf_stats['baseline_gen_times'][-1]:.3f}s")
     tqdm.write('-'*80)
 
-# ========= Rezumat & Grafic =========
-mean_ppo_reward = np.mean(ppo_rewards)
-mean_base_reward = np.mean(base_rewards)
-mean_ppo_time = np.mean(perf_stats['ppo_gen_times'])
-mean_base_time = np.mean(perf_stats['baseline_gen_times'])
-mean_peak_mem = np.mean(perf_stats['gpu_mem_peak'])
+# ========= Rezultate și grafic =========
+mean_ppo = np.mean(ppo_rewards)
+mean_base = np.mean(base_rewards)
+mean_time_ppo = np.mean(perf_stats['ppo_gen_times'])
+mean_time_base = np.mean(perf_stats['baseline_gen_times'])
+mean_mem = np.mean(perf_stats['gpu_mem_peak'])
+print(f"Mean PPO Reward: {mean_ppo:.4f} | Mean Base Reward: {mean_base:.4f}")
+print(f"Avg PPO Time: {mean_time_ppo:.3f}s | Avg Base Time: {mean_time_base:.3f}s | Avg GPU Mem: {mean_mem:.1f}MB")
 
-print(f"Mean Policy Reward: {mean_ppo_reward:.4f}")
-print(f"Mean Baseline Reward: {mean_base_reward:.4f}")
-print(f"Mean Policy Gen Time: {mean_ppo_time:.3f}s")
-print(f"Mean Baseline Gen Time: {mean_base_time:.3f}s")
-print(f"Average GPU Peak Mem: {mean_peak_mem:.1f}MB")
-
-# Plotting
+# Plotează timpii de generare
 N = len(PROMPTS_USER)
 idx = np.arange(N)
-w = 0.3
-plt.figure(figsize=(12,6))
-plt.bar(idx, perf_stats['baseline_gen_times'], w, label='Baseline Gen Time')
-plt.bar(idx+w, perf_stats['ppo_gen_times'], w, label='Policy Gen Time')
-plt.ylabel('Generation Time (s)')
-plt.xlabel('Example')
-plt.title('Qwen PPO vs Baseline Generation Time on User Prompts')
+w = 0.35
+plt.figure(figsize=(10,5))
+plt.bar(idx, perf_stats['baseline_gen_times'], w, label='Baseline')
+plt.bar(idx+w, perf_stats['ppo_gen_times'], w, label='PPO')
+plt.xlabel('Exemplu')
+plt.ylabel('Timp generare (s)')
+plt.title('Qwen PPO vs Baseline Gen Time')
 plt.xticks(idx+w/2, [f"Ex{i}" for i in range(N)])
 plt.legend()
 plt.grid(axis='y', ls='--', alpha=0.5)
 plt.tight_layout()
 plt.savefig("qwen_perf_user_prompts.png", dpi=300)
+plt.show()
+
+# ======== Plot Mean Positive Probability with SEM ========
+labels = ["BASE", "PPO"]
+means = [np.mean(base_rewards), np.mean(ppo_rewards)]
+sems = [np.std(base_rewards)/np.sqrt(len(base_rewards)), np.std(ppo_rewards)/np.sqrt(len(ppo_rewards))]
+
+plt.figure(figsize=(6,5))
+plt.bar(labels, means, yerr=sems, capsize=5, color=['blue', 'orange'])
+plt.ylabel('Mean Positive Probability')
+plt.title("Base vs PPO: P(positive) on Generated Text")
+plt.grid(axis='y', ls='--', alpha=0.5)
+plt.tight_layout()
+plt.savefig("base_vs_ppo_positive.png", dpi=300)
 plt.show()
