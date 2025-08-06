@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from torch.amp.autocast_mode import autocast
 import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 from transformers.utils.quantization_config import BitsAndBytesConfig
 from peft import (
@@ -37,9 +38,9 @@ def temporary_cache(peft_lm, enable_cache: bool = True):
             base.gradient_checkpointing_enable()
 
 
-class GRPOQLoRA(nn.Module):
+class DPOQLoRA(nn.Module):
     """
-    QLoRA policy model for GRPO: 4-bit NF4 LoRA-adapted causal LM, no value head.
+    QLoRA policy model for DPO: 4-bit NF4 LoRA-adapted causal LM, no value head.
     Supports new or pretrained (SFT) LoRA adapters.
     """
     def __init__(
@@ -116,7 +117,7 @@ class GRPOQLoRA(nn.Module):
         if save_adapters:
             self.model.save_pretrained(save_directory)
             print(f"[save] Adapters saved to {save_directory}")
-        meta_obj = {"class": "QwenQLoRA", "base_model": self.model.base_model.name_or_path}
+        meta_obj = {"class": "DPOQLoRA", "base_model": self.model.base_model.name_or_path}
         if meta: meta_obj.update(meta)
         with open(os.path.join(save_directory, "meta.json"), "w") as f:
             json.dump(meta_obj, f, indent=2)
@@ -166,3 +167,19 @@ class GRPOQLoRA(nn.Module):
         obj.forward               = getattr(cls, "forward").__get__(obj, cls)
         obj.save_pretrained       = getattr(cls, "save_pretrained").__get__(obj, cls)
         return obj
+
+def dpo_loss(pi_logps, ref_logps, yw_idxs, yl_idxs, beta):
+    """
+    pi_logps: policy logprobs, shape (B,)
+    ref_logps: reference model logprobs, shape (B,)
+    yw_idxs: preferred completion indices, shape (T,)
+    yl_idxs: dispreferred completion indices, shape (T,)
+    beta: temperature controlling strength of KL penalty
+    """
+    # Gather log-prob pairs
+    pi_w = pi_logps[yw_idxs]
+    pi_l = pi_logps[yl_idxs]
+    ref_w = ref_logps[yw_idxs]
+    ref_l = ref_logps[yl_idxs]
+    # Compute DPO loss
+    return -torch.log(torch.sigmoid(beta * ((pi_w - ref_w) - (pi_l - ref_l)))).mean()

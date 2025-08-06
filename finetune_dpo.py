@@ -1,20 +1,15 @@
 import os
 import torch
 import torch._dynamo
-from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.optimization import get_linear_schedule_with_warmup
 from transformers.utils.quantization_config import BitsAndBytesConfig
-from torch.optim import AdamW
+from torch.optim import RMSprop
 
-from _grpo.config_grpo import Config
+from __dpo.config_dpo import Config
 from imdb_dataset import build_imdb_dataloader
-from _grpo.GRPOAgent import GRPOAgent
-from _grpo.rewards_fn import keyword_reward, sentiment_reward
-from _grpo.PolicyValueNN import GRPOQLoRA
+from __dpo.DPOAgent import DPOAgent
+from __dpo.PolicyValueNN import DPOQLoRA
 
 
 def _prep_tokenizer(tok):
@@ -66,14 +61,14 @@ def main():
     # Policy model
     if getattr(cfg, "resume_dir", None):
         print(f"[LOAD] Resuming from: {cfg.resume_dir}")
-        policy_model = GRPOQLoRA.from_pretrained(
+        policy_model = DPOQLoRA.from_pretrained(
             cfg.resume_dir,
             device_map="auto",
             use_gradient_checkpointing=True,
             use_cache=False,
         )
     else:
-        policy_model = GRPOQLoRA(
+        policy_model = DPOQLoRA(
             model_name=cfg.policy_model_name,
             r=getattr(cfg, "lora_r", 16),
             lora_alpha=getattr(cfg, "lora_alpha", 32),
@@ -90,36 +85,23 @@ def main():
     # Policy reference
     policy_ref = build_ref_model_4bit(cfg.policy_model_name)
 
-    # Reward model + tokenizer
-    reward_model = AutoModelForSequenceClassification.from_pretrained(cfg.reward_model_name)
-    reward_tokenizer = AutoTokenizer.from_pretrained(cfg.reward_model_name)
-    reward_device = getattr(cfg, "reward_device", cfg.device)
-    reward_model.to(reward_device).eval()
-
     # Optimizer & Scheduler
     trainable = [p for p in policy_model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable, lr=cfg.lr)
+    optimizer = RMSprop(trainable, lr=cfg.lr)
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=cfg.warmup_steps,
         num_training_steps=total_updates,
     )
 
-    # Reward functions
-    reward_funcs = [
-        # keyword_reward(['excellent', 'poor'], bonus=0.5),
-        sentiment_reward(reward_model, reward_tokenizer, cfg),
-    ]
-
-    # GRPO Agent
-    agent = GRPOAgent(
+    # DPO Agent
+    agent = DPOAgent(
         policy_model=policy_model,
         policy_ref=policy_ref,
         tokenizer=tokenizer,
         optimizer=optimizer,
         scheduler=scheduler,
         config=cfg,
-        reward_functions=reward_funcs,
     )
 
     # Train

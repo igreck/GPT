@@ -32,7 +32,6 @@ class GRPOAgent:
         scheduler,
         config,
         reward_functions,
-        reward_model=None,
     ):
         # Config and device
         self.cfg = config
@@ -48,7 +47,6 @@ class GRPOAgent:
         self.policy_model = policy_model.to(self.device).train()
         self.policy_ref   = policy_ref.to(self.device).eval()
         self.policy_old   = copy.deepcopy(self.policy_model).to(self.device).eval()
-        self.reward_model = reward_model
 
         # Gradient checkpointing
         if hasattr(self.policy_model, 'gradient_checkpointing_enable'):
@@ -97,10 +95,6 @@ class GRPOAgent:
             seqs = gen.sequences[:, inputs['input_ids'].size(1):]
         return self.tokenizer.batch_decode(seqs, skip_special_tokens=True)
 
-    def compute_group_with_rewards(self, completions: List[str]) -> torch.Tensor:
-        scores = self.reward_model.batch_score(completions) #type: ignore
-        return scores.to(self.device)
-    
     def compute_group_rewards(self, completions: List[str]) -> torch.Tensor:
         scores = [fn(completions).to(self.device) for fn in self.reward_functions]
         return torch.stack(scores).sum(dim=0)
@@ -109,18 +103,6 @@ class GRPOAgent:
         lp = F.log_softmax(logits, dim=-1)
         token_lp = lp.gather(2, labels.unsqueeze(-1)).squeeze(-1)
         return token_lp * mask
-
-    def _update_reward_model(self):
-        """
-        Train the reward model on collected replay buffer data.
-        """
-        import random
-        if len(self.replay_buffer) < self.cfg.reward_batch_size:
-            return
-        batch = random.sample(self.replay_buffer, self.cfg.reward_batch_size)
-        prompts, comps, rewards = zip(*batch)
-        # TODO: implement reward model training using (prompts, comps, rewards)
-        return None
 
     def train(self, dataloader):
         cfg = self.cfg
@@ -138,19 +120,8 @@ class GRPOAgent:
                 # Generate group
                 groups = [self.generate(prompts) for _ in range(cfg.group_size)]
                 raw = torch.stack([self.compute_group_rewards(g) for g in groups])  # [G,B]
-
-                # Off-policy replay: store experiences for reward model updates
-                for i in range(cfg.group_size):
-                    for j, prompt in enumerate(prompts):
-                        self.replay_buffer.append((prompt, groups[i][j], raw[i, j].item()))
-                # Periodically update reward model
-                if getattr(cfg, "reward_update_every", None) and update_count % cfg.reward_update_every == 0:
-                    self._update_reward_model()
-
-                # Outcome supervision: normalize group rewards
                 baseline = raw.mean(dim=0)
-                std = raw.std(dim=0, unbiased=False).clamp_min(1e-8)
-                advantage = (raw - baseline.unsqueeze(0)) / std.unsqueeze(0)
+                advantage = raw - baseline.unsqueeze(0)
 
                                 # logging opțional per‑exemplu
                 if update_count % getattr(cfg, "log_every", 50) == 0 and update_count != 0:
@@ -214,19 +185,12 @@ class GRPOAgent:
                             surrogate = torch.min(ratio * adv_mb, r_clip * adv_mb) * am
                             policy_loss = -surrogate.sum() / am.sum()
 
-                            # token-wise KL via unbiased estimator (Schulman 2020)
-                            # Compute log-probabilities only at the generated token positions
-                            token_logp_new = F.log_softmax(logits, dim=-1).gather(-1, ids.unsqueeze(-1)).squeeze(-1)
-                            token_logp_ref = F.log_softmax(logits_ref, dim=-1).gather(-1, ids.unsqueeze(-1)).squeeze(-1)
-                            # Compute per-token ratio and unbiased KL estimate
-                            token_log_ratio = token_logp_ref - token_logp_new
-                            token_ratio = torch.exp(token_log_ratio)
-                            kl_est = token_ratio - token_log_ratio - 1
-                            # Mask non-token positions and average
-                            kl = (kl_est * am).sum() / am.sum()
-
-                            # kl_token = (p_ref * (logp_ref - logp_new)).sum(dim=-1)
-                            # kl = (kl_token * am).sum() / am.sum()
+                            # token-wise KL
+                            p_ref  = F.softmax(logits_ref, dim=-1)
+                            logp_new = F.log_softmax(logits, dim=-1)
+                            logp_ref = F.log_softmax(logits_ref, dim=-1)
+                            kl_token = (p_ref * (logp_ref - logp_new)).sum(dim=-1)
+                            kl = (kl_token * am).sum() / am.sum()
 
                             loss = policy_loss + cfg.kl_coef * kl
 
