@@ -82,6 +82,7 @@ def main():
             load_value_head_from=getattr(cfg, "resume_dir", None),
         )
     policy_model.to(cfg.device)
+    policy_model = torch.compile(policy_model)
 
     # === Policy ref (4-bit, frozen) ===
     policy_ref = build_ref_model_4bit(cfg.policy_model_name)

@@ -1,5 +1,6 @@
 import os
 import torch
+import torch._dynamo
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
@@ -9,10 +10,11 @@ from transformers.optimization import get_linear_schedule_with_warmup
 from transformers.utils.quantization_config import BitsAndBytesConfig
 from torch.optim import AdamW
 
-from config_grpo import Config
+from _grpo.config_grpo import Config
 from imdb_dataset import build_imdb_dataloader
-from _grpo.GRPOAgent import GRPOAgent, keyword_reward, sentiment_reward
-from QwenQLoRA import QwenQLoRA
+from _grpo.GRPOAgent import GRPOAgent
+from _grpo.rewards_fn import keyword_reward, sentiment_reward
+from _grpo.PolicyValueNN import PPOQLoRA
 
 
 def _prep_tokenizer(tok):
@@ -23,6 +25,7 @@ def _prep_tokenizer(tok):
 
 
 def build_ref_model_4bit(model_name: str):
+    """Încărcare policy_ref înghețat în 4-bit NF4 pentru economie de VRAM."""
     bnb_cfg = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -54,6 +57,7 @@ def main():
         num_workers=cfg.num_workers,
         seed=cfg.seed,
     )
+    
     tokenizer = _prep_tokenizer(tokenizer)
 
     # Total update steps for scheduler
@@ -62,24 +66,26 @@ def main():
     # Policy model
     if getattr(cfg, "resume_dir", None):
         print(f"[LOAD] Resuming from: {cfg.resume_dir}")
-        policy_model = QwenQLoRA.from_pretrained(
+        policy_model = PPOQLoRA.from_pretrained(
             cfg.resume_dir,
             device_map="auto",
             use_gradient_checkpointing=True,
             use_cache=False,
         )
     else:
-        policy_model = QwenQLoRA(
+        policy_model = PPOQLoRA(
             model_name=cfg.policy_model_name,
-            r=cfg.lora_r,
-            lora_alpha=cfg.lora_alpha,
-            lora_dropout=cfg.lora_dropout,
+            r=getattr(cfg, "lora_r", 16),
+            lora_alpha=getattr(cfg, "lora_alpha", 32),
+            lora_dropout=getattr(cfg, "lora_dropout", 0.05),
             use_gradient_checkpointing=True,
             use_cache=False,
             device_map="auto",
             lora_from_sft_dir=cfg.sft_dir,
         )
     policy_model.to(cfg.device)
+    # torch._dynamo.config.dynamic_shapes = True
+    # policy_model = torch.compile(policy_model, dynamic=True)
 
     # Policy reference
     policy_ref = build_ref_model_4bit(cfg.policy_model_name)
@@ -87,7 +93,8 @@ def main():
     # Reward model + tokenizer
     reward_model = AutoModelForSequenceClassification.from_pretrained(cfg.reward_model_name)
     reward_tokenizer = AutoTokenizer.from_pretrained(cfg.reward_model_name)
-    reward_model.to(cfg.reward_device).eval()
+    reward_device = getattr(cfg, "reward_device", cfg.device)
+    reward_model.to(reward_device).eval()
 
     # Optimizer & Scheduler
     trainable = [p for p in policy_model.parameters() if p.requires_grad]
@@ -116,9 +123,7 @@ def main():
     )
 
     # Train
-    agent.train(
-        dataloader  # expects dataloader of batches of prompts
-    )
+    agent.train(dataloader)
 
     # Save last checkpoint
     out_dir = os.path.join(cfg.save_dir, "checkpoint_last")

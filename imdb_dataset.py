@@ -63,11 +63,12 @@ def build_imdb_dataloader(
             "input_ids": toks["input_ids"],
             "attention_mask": toks["attention_mask"],
             "labels": labels,
+            "text": batch["prompt"]
         }
 
     ds = ds.map(tok_prompt, batched=True, batch_size=map_batch_size, desc="Tokenizing prompts")
-    ds = ds.remove_columns([c for c in ds.column_names if c not in ("input_ids","attention_mask","labels")])
-    ds.set_format(type="torch", columns=["input_ids","attention_mask","labels"])
+    ds = ds.remove_columns([c for c in ds.column_names if c not in ("input_ids","attention_mask","labels", "text")])
+    ds.set_format(type="torch", columns=["input_ids","attention_mask","labels", "text"])
 
     loader = DataLoader(
         ds,
@@ -78,5 +79,6 @@ def build_imdb_dataloader(
         generator=torch.Generator().manual_seed(seed),
         drop_last=drop_last,
         persistent_workers=num_workers > 0,
+        prefetch_factor=2
     )
     return loader, tokenizer
