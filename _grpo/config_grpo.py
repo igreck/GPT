@@ -10,7 +10,7 @@ class Config:
         self.reward_model_name   = "lvwerra/distilbert-imdb"
         self.lora_from_sft_dir   = "./models/sft_imdb_qlora_qwen"
         self.sft_dir             = self.lora_from_sft_dir
-        self.resume_dir          = None
+        self.resume_dir          = "./models/grpo_qlora_2025-06-08-17-16-29_best"
 
         # Device
         self.device = ("cuda" if torch.cuda.is_available()
