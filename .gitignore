@@ -1,6 +1,10 @@
 #models
 models/
 
+#cache unsloth
+unsloth_compiled_cache/
+unsloth_training_checkpoints/
+
 #logs and runs
 logs/
 runs/

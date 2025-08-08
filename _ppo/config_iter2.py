@@ -12,7 +12,7 @@ class Config:
         self.sft_dir = self.lora_from_sft_dir
 
         # reluare PPO dintr-un director cu adapters + value_head.pt (opțional)
-        self.resume_dir = "./models/rl_imdb_qlora_qwen_best"
+        self.resume_dir = "./models/ppo_imdb_qlora_qwen_best_iter2"
 
         # device pentru reward model (implicit același cu policy)
         self.device = ("cuda" if torch.cuda.is_available()

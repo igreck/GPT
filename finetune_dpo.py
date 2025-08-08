@@ -6,10 +6,10 @@ from transformers.optimization import get_linear_schedule_with_warmup
 from transformers.utils.quantization_config import BitsAndBytesConfig
 from torch.optim import RMSprop
 
-from __dpo.config_dpo import Config
+from _dpo.config_dpo import Config
 from imdb_dataset import build_imdb_dataloader
-from __dpo.DPOAgent import DPOAgent
-from __dpo.PolicyValueNN import DPOQLoRA
+from _dpo.DPOAgent import DPOAgent
+from _dpo.PolicyValueNN import DPOQLoRA
 
 
 def _prep_tokenizer(tok):

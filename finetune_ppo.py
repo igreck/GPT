@@ -5,7 +5,7 @@ from transformers.optimization import get_linear_schedule_with_warmup
 from transformers.utils.quantization_config import BitsAndBytesConfig
 from torch.optim import AdamW
 
-from _ppo.config import Config
+from _ppo.config_iter2 import Config
 from imdb_dataset import build_imdb_dataloader
 from _ppo.PPOAgent import PPOAgent
 from _ppo.PolicyValueNN import PPOQLoRAWithValueHead

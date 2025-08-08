@@ -13,7 +13,7 @@ from torch.optim import AdamW
 from _grpo.config_grpo import Config
 from imdb_dataset import build_imdb_dataloader
 from _grpo.GRPOAgent import GRPOAgent
-from _grpo.rewards_fn import keyword_reward, sentiment_reward
+from _grpo.rewards import keyword_reward, sentiment_reward
 from _grpo.PolicyValueNN import GRPOQLoRA
 
 
