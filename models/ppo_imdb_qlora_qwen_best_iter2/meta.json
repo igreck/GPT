@@ -1,0 +1,5 @@
+{
+  "class": "QwenQLoRAWithValueHead",
+  "base_model_name": "unsloth/Qwen3-1.7B-Base",
+  "hidden_size": 2048
+}
