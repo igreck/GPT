@@ -7,6 +7,7 @@ from torch.optim import AdamW
 
 from _ppo.config_iter2 import Config
 from imdb_dataset import build_imdb_dataloader
+from openr1_dataset import build_openr1_dataloader
 from _ppo.PPOAgent import PPOAgent
 from _ppo.PolicyValueNN import PPOQLoRAWithValueHead
 
@@ -41,7 +42,7 @@ def main():
     cfg = Config()
 
     # === DataLoader + tokenizer (policy) ===
-    dataloader, tokenizer = build_imdb_dataloader(
+    dataloader, tokenizer = build_openr1_dataloader(
         tokenizer_name=cfg.policy_model_name,
         split=cfg.split,
         batch_size=cfg.batch_size,
@@ -82,7 +83,7 @@ def main():
             load_value_head_from=getattr(cfg, "resume_dir", None),
         )
     policy_model.to(cfg.device)
-    policy_model = torch.compile(policy_model)
+    # policy_model = torch.compile(policy_model)
 
     # === Policy ref (4-bit, frozen) ===
     policy_ref = build_ref_model_4bit(cfg.policy_model_name)

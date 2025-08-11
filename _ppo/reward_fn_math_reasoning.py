@@ -1,8 +1,10 @@
 import re
+import torch
 
-class Rewarder:
-    def __init__(self, tokenizer):
+class RewardFunctions:
+    def __init__(self, tokenizer, device):
         self.tokenizer = tokenizer
+        self.device = device
         # Make sure we have a pad_token
         if self.tokenizer.pad_token_id is None:
              self.tokenizer.add_special_tokens({'pad_token': self.tokenizer.eos_token})
@@ -34,7 +36,7 @@ class Rewarder:
         scores = []
         for completion in completions:
             score = 0
-            response = completion[0]["content"]
+            response = completion
             # Match if format is seen exactly!
             if self.match_format.search(response) is not None: score += 3.0
             scores.append(score)
@@ -45,7 +47,7 @@ class Rewarder:
         scores = []
         for completion in completions:
             score = 0
-            response = completion[0]["content"]
+            response = completion
             # Count how many keywords are seen - we penalize if too many!
             # If we see 1, then plus some points!
 
@@ -58,8 +60,8 @@ class Rewarder:
         return scores
 
     def check_answer(self, prompts, completions, answer, **kwargs):
-        question = prompts[0][-1]["content"]
-        responses = [completion[0]["content"] for completion in completions]
+        question = prompts[1]["content"]
+        responses = completions
 
         extracted_responses = [
             guess.group(1)
@@ -95,8 +97,8 @@ class Rewarder:
 
 
     def check_numbers(self, prompts, completions, answer, **kwargs):
-        question = prompts[0][-1]["content"]
-        responses = [completion[0]["content"] for completion in completions]
+        question = prompts[1]["content"]
+        responses = completions
 
         extracted_responses = [
             guess.group(1)
@@ -121,19 +123,72 @@ class Rewarder:
         return scores
 
 
-    def compute_all_rewards(self, prompts, completions, answers=None, **kwargs):
+    def compute_all_rewards(
+        self,
+        prompts,
+        completions,
+        answers=None,
+        *,
+        weights=None,              # ex: {"match_format_exactly":1.0, "match_format_approximately":0.5, "check_answer":2.0, "check_numbers":1.0}
+        reduce: str = "sum",       # "sum" or "mean" across components
+        device=None,
+        dtype=torch.float32,
+        return_components: bool = False,
+        **kwargs
+    ):
         """
-        Compute rewards using all scoring methods and return a dict of scores.
+        Compute rewards using all scoring methods and return a tensor of accumulated rewards per completion.
+        Optionally returns the individual component tensors when `return_components=True`.
         """
-        # Format-based rewards
+        B = len(completions)
+        device = device or getattr(self, "device", None) or "cpu"
+
+        # --- component scores ---
         exact_fmt = self.match_format_exactly(completions, **kwargs)
         approx_fmt = self.match_format_approximately(completions, **kwargs)
-        # Content-based rewards (if answers provided)
-        answer_scores = self.check_answer(prompts, completions, answers, **kwargs) if answers is not None else [0.0]*len(completions)
-        number_scores = self.check_numbers(prompts, completions, answers, **kwargs) if answers is not None else [0.0]*len(completions)
-        return {
-            'match_format_exactly': exact_fmt,
-            'match_format_approximately': approx_fmt,
-            'check_answer': answer_scores,
-            'check_numbers': number_scores
+
+        if answers is not None:
+            answer_scores = self.check_answer(prompts, completions, answers, **kwargs)
+            number_scores = self.check_numbers(prompts, completions, answers, **kwargs)
+        else:
+            answer_scores = [0.0] * B
+            number_scores = [0.0] * B
+
+        comps = {
+            'match_format_exactly': torch.as_tensor(exact_fmt, dtype=dtype, device=device),
+            'match_format_approximately': torch.as_tensor(approx_fmt, dtype=dtype, device=device),
+            'check_answer': torch.as_tensor(answer_scores, dtype=dtype, device=device),
+            'check_numbers': torch.as_tensor(number_scores, dtype=dtype, device=device)
         }
+
+        # sanitize shapes and values
+        for k in comps:
+            comps[k] = torch.nan_to_num(comps[k], nan=0.0, posinf=0.0, neginf=0.0)
+            if comps[k].ndim != 1 or comps[k].shape[0] != B:
+                comps[k] = comps[k].reshape(-1)[:B]
+                if comps[k].shape[0] < B:
+                    pad = torch.zeros(B - comps[k].shape[0], dtype=dtype, device=device)
+                    comps[k] = torch.cat([comps[k], pad], dim=0)
+
+        # weights
+        default_weights = {
+            'match_format_exactly': 1.0,
+            'match_format_approximately': 1.0,
+            'check_answer': 1.0,
+            'check_numbers': 1.0
+        }
+        if weights is not None:
+            default_weights.update(weights)
+        w = {k: float(default_weights.get(k, 0.0)) for k in comps.keys()}
+
+        # aggregate
+        stacked = torch.stack([comps[k] * w[k] for k in comps.keys()], dim=0)  # [num_comp, B]
+        if reduce == 'mean':
+            total = stacked.mean(dim=0)
+        else:
+            total = stacked.sum(dim=0)
+
+        if return_components:
+            return total, comps  # total: [B], comps: dict[str, Tensor[B]]
+        return total  # Tensor[B]
+

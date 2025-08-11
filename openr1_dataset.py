@@ -82,6 +82,47 @@ def build_openr1_dataloader(
 
     dataset = dataset.map(make_prompt, desc="Building prompts")
 
+    # === Keep only samples where (prompt + reasoning response) <= 512 tokens ===
+    def _extract_reason_text(sol: str) -> str:
+        if not isinstance(sol, str) or len(sol) == 0:
+            return ""
+        # Prefer explicit reasoning markers, else take text before <SOLUTION>
+        start_idx = sol.find(reasoning_start)
+        end_idx = sol.find(reasoning_end)
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            return sol[start_idx + len(reasoning_start):end_idx].strip()
+        # Fallback: if <SOLUTION> exists, take everything before it as reasoning
+        sol_start_idx = sol.find(solution_start)
+        if sol_start_idx != -1:
+            return sol[:sol_start_idx].strip()
+        # Otherwise, treat the entire solution as reasoning (best effort)
+        return sol.strip()
+
+    def _measure_prompt_plus_reason_length(batch):
+        prompts = batch["prompt"]
+        solutions = batch.get("solution", [None] * len(prompts))
+        # Tokenize chat messages via chat_template (prompt side)
+        prompt_tok_lists = tokenizer.apply_chat_template(
+            prompts, add_generation_prompt=True, tokenize=True
+        )
+        # Tokenize reasoning text (assistant's chain-of-thought) without extra specials
+        reason_texts = [_extract_reason_text(sol) for sol in solutions]
+        reason_tok_lists = tokenizer(
+            reason_texts, add_special_tokens=False
+        )["input_ids"]
+        total_lens = [len(p) + len(r) for p, r in zip(prompt_tok_lists, reason_tok_lists)]
+        return {"_pr_total_len": total_lens}
+
+    dataset = dataset.map(
+        _measure_prompt_plus_reason_length,
+        batched=True,
+        batch_size=map_batch_size,
+        desc="Measuring prompt+reason length"
+    )
+
+    # Filter to keep only entries where prompt + reasoning <= 512 tokens
+    dataset = dataset.filter(lambda x: int(x["_pr_total_len"]) <= policy_max_length)
+
     def tok_prompt(batch):
         # Tokenize chat messages via chat_template
         # batch['messages'] is a list of message lists
@@ -108,10 +149,11 @@ def build_openr1_dataloader(
         }
 
     dataset = dataset.map(tok_prompt, batched=True, batch_size=map_batch_size, desc="Tokenizing prompts")
-    dataset = dataset.remove_columns([c for c in dataset.column_names if c not in ("input_ids","attention_mask","labels", "prompt", "solution")])
+    keep_cols = ("input_ids", "attention_mask", "labels", "prompt", "solution")
+    dataset = dataset.remove_columns([c for c in dataset.column_names if c not in keep_cols])
     dataset.set_format(type="torch", columns=["input_ids","attention_mask","labels"], output_all_columns=True)
 
-    print(tokenizer.decode(dataset[0]['input_ids']))
+    # print(tokenizer.decode(dataset[0]['input_ids']))
 
     # tokenized = dataset.map(
     # lambda x: {"tokens" : tokenizer.apply_chat_template(x["prompt"], add_generation_prompt = True, tokenize = True)},

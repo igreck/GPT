@@ -10,6 +10,7 @@ from torch.amp.grad_scaler import GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import torch.backends.cudnn as cudnn
 from collections import deque
+from .reward_fn_math_reasoning import RewardFunctions
 
 class PPOAgent:
     """Proximal Policy Optimization agent with mixed-precision, micro-batching, and advanced logging."""
@@ -69,14 +70,16 @@ class PPOAgent:
         if hasattr(self.policy_model, "model") and hasattr(self.policy_model.model, "gradient_checkpointing_enable"):
             self.policy_model.model.gradient_checkpointing_enable()
 
-        self.optimizer = optimizer
-        self.tokenizer = tokenizer
-        self.reward_tokenizer = reward_tokenizer
-
         # Asigură-te că există pad_token și padding_left
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
+
+        self.optimizer = optimizer
+        self.tokenizer = tokenizer
+        self.reward_tokenizer = reward_tokenizer
+
+        self.rfn = RewardFunctions(self.tokenizer, self.device)
 
     # ---- Core utils ----
     def compute_logprobs(self, logits: torch.Tensor, labels: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -279,7 +282,7 @@ class PPOAgent:
                 # 1) Generează DOAR completările și tokenizează fără prefix masking
                 completions = self.generate(batch_inputs)
                 tok = self.tokenize_clean(completions, prefix_lens=None)
-                # result_after_clean = self.tokenizer.batch_decode(tok["input_ids"], skip_special_tokens=True)  # (nefolosit)
+                clean_completions = self.tokenizer.batch_decode(tok["input_ids"], skip_special_tokens=True)  # (nefolosit)
                 input_ids, attention_mask, labels = tok["input_ids"], tok["attention_mask"], tok["labels"]
 
                 # 2) Old logprobs/policy + old values (no_grad) și ref_logprobs (no_grad)
@@ -301,7 +304,7 @@ class PPOAgent:
                 old_values          = old_values_.clone().detach()
 
                 # 3) Rewards BRUTE (fără normalizare pe batch)
-                raw_rewards = self.compute_sentiment_reward(
+                raw_sentiment_rewards = self.compute_sentiment_reward(
                     completions,
                     use_margin=getattr(self.cfg, "use_margin_reward", False),
                     add_length_bonus=getattr(self.cfg, "add_length_bonus", True),
@@ -309,9 +312,14 @@ class PPOAgent:
                     bonus=getattr(self.cfg, "length_bonus", 0.05),
                 )
                 # Normalize rewards for stability in NLP setting
+                raw_fn_rewards = self.rfn.compute_all_rewards(
+                    prompts=batch["prompt"], 
+                    completions=clean_completions, 
+                    answers=batch["solution"])
+                raw_rewards = raw_sentiment_rewards + raw_fn_rewards
                 rewards = (raw_rewards - raw_rewards.mean()) / (raw_rewards.std() + 1e-8)
                 rewards = raw_rewards.clamp(-5.0, 5.0)
-
+             
                 # estimate next values for GAE (shift by one; placeholder)
                 nv = torch.cat([raw_rewards.new_tensor([0.0]), old_values[:-1]])  # shift
                 dones = torch.zeros_like(raw_rewards)

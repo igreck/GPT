@@ -10,12 +10,13 @@ class Config:
         self.reward_model_name = "lvwerra/distilbert-imdb"
 
         # SFT adapters (LoRA) de la care pornești PPO
-        self.lora_from_sft_dir = "./models/sft_imdb_qlora_qwen"
+        self.lora_from_sft_dir = "./models/sft_math_qlora_qwen"
         # alias pentru compatibilitate cu codul principal
         self.sft_dir = self.lora_from_sft_dir
 
         # reluare PPO dintr-un director cu adapters + value_head.pt (opțional)
-        self.resume_dir = "./models/ppo_imdb_qlora_qwen_best_iter2"
+        # self.resume_dir = "./models/ppo_imdb_qlora_qwen_best_iter2"
+        self.resume_dir = None
 
         # device pentru reward model (implicit același cu policy)
         self.device = ("cuda" if torch.cuda.is_available()
@@ -56,13 +57,13 @@ class Config:
         self.warmup_steps = 500
 
         # === Generation ===
-        self.max_new_tokens = 128
+        self.max_new_tokens = 1024
         self.top_p = 0.9
         self.temperature = 0.5
         self.repetition_penalty = 1.1
 
         # === Lengths ===
-        self.policy_max_length = 512
+        self.policy_max_length = 2048
         self.reward_max_length = 512
 
         # === Data ===
