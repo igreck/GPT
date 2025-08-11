@@ -50,8 +50,8 @@ class Config:
         # === Train (batching) ===
         self.n_epochs = 6
         self.lr = 1e-5
-        self.batch_size = 8
-        self.microbatch_size = 4
+        self.batch_size = 4
+        self.microbatch_size = 2
         self.accum_steps = 2
         self.ppo_epochs = 4
         self.warmup_steps = 500
