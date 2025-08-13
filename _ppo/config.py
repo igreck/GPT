@@ -6,11 +6,11 @@ class Config:
         # Jurnal
         self.timestamp = datetime.now().strftime("%Y-%d-%m-%H-%M-%S")
         # === Models ===
-        self.policy_model_name = "Qwen/Qwen3-1.7B-Base"
+        self.policy_model_name = "Qwen/Qwen3-4B-Base"
         self.reward_model_name = "lvwerra/distilbert-imdb"
 
         # SFT adapters (LoRA) de la care pornești PPO
-        self.lora_from_sft_dir = "./models/sft_math_qlora_qwen"
+        self.lora_from_sft_dir = "./models/sft_math_qlora_qwen_4b"
         # alias pentru compatibilitate cu codul principal
         self.sft_dir = self.lora_from_sft_dir
 
@@ -77,8 +77,8 @@ class Config:
         self.log_every = 10
         self.log_interval = self.log_every
         self.save_every = 5
-        self.log_dir = f"runs/ppo_{self.timestamp}"
-        self.save_dir = f"models/ppo_qlora_{self.timestamp}"  # corectat (qlora)
+        self.log_dir = f"runs/ppo_math_{self.timestamp}"
+        self.save_dir = f"models/ppo_math_qlora_{self.timestamp}"  # corectat (qlora)
 
         # === PPO advanced hyperparameters ===
         self.gamma = 0.99

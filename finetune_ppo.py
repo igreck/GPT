@@ -83,7 +83,8 @@ def main():
             load_value_head_from=getattr(cfg, "resume_dir", None),
         )
     policy_model.to(cfg.device)
-    # policy_model = torch.compile(policy_model)
+    # policy_model = torch.compile(policy_model, mode="max-autotune", fullgraph=False)
+
 
     # === Policy ref (4-bit, frozen) ===
     policy_ref = build_ref_model_4bit(cfg.policy_model_name)
@@ -97,7 +98,7 @@ def main():
 
     # === Optimizer & Scheduler (doar parametrii trainabili: LoRA + value head) ===
     trainable = [p for p in policy_model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable, lr=cfg.lr)
+    optimizer = AdamW(trainable, lr=cfg.lr, fused=True)
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=cfg.warmup_steps,

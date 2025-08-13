@@ -66,7 +66,7 @@ def build_openr1_dataloader(
     tokenizer.chat_template = chat_template
 
 
-    dataset = load_dataset("open-r1/DAPO-Math-17k-Processed", 'en', split=split)
+    dataset = load_dataset("open-r1/DAPO-Math-17k-Processed", 'en', split=split, trust_remote_code=True)
     if shuffle: dataset = dataset.shuffle(seed=seed)
 
 

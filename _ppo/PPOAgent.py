@@ -44,7 +44,11 @@ class PPOAgent:
         torch.backends.cudnn.deterministic = False
         # enable CuDNN benchmark for fixed input shapes to improve throughput
         cudnn.benchmark = True
-
+        # AMP / dtype setup (once)
+        self.amp_enabled = torch.cuda.is_available()
+        self.autocast_dtype = torch.bfloat16 if (self.amp_enabled and torch.cuda.is_bf16_supported()) else None
+        if self.amp_enabled:
+            torch.set_float32_matmul_precision("high")
         # experiențe pentru off-policy replay
         self.replay_buffer = deque(maxlen=self.cfg.buffer_size)
 
@@ -96,7 +100,7 @@ class PPOAgent:
 
     def compute_sentiment_reward(self, texts, use_margin=False, add_length_bonus=True, min_words=6, bonus=0.05):
         # Tokenizare robustă pentru reward model (max_length separat)
-        with torch.no_grad():
+        with torch.inference_mode():
             inputs = self.reward_tokenizer(
                 texts,
                 return_tensors="pt",
@@ -133,8 +137,8 @@ class PPOAgent:
         return raw  # [B]
 
     def compute_entropy(self, logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        probs = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
+        probs = log_probs.exp()
         ent = -(probs * log_probs).sum(dim=-1)
         denom = mask.sum(dim=1).clamp_min(1)
         return (ent * mask).sum(dim=1) / denom
@@ -231,12 +235,12 @@ class PPOAgent:
         }
 
     def generate(self, batch_inputs, max_new_tokens=None):
-        with torch.no_grad():
+        with torch.inference_mode():
             max_new_tokens = max_new_tokens or self.cfg.max_new_tokens
             rep_pen = getattr(self.cfg, "repetition_penalty", 1.0)
-            amp_enabled = torch.cuda.is_available()
-            with autocast(device_type="cuda" if amp_enabled else "cpu", enabled=amp_enabled):
-                gen = self.policy_model.generate(
+            with autocast(device_type="cuda" if self.amp_enabled else "cpu", 
+                            dtype=self.autocast_dtype, enabled=self.amp_enabled):
+                    gen = self.policy_model.generate(
                     input_ids=batch_inputs["input_ids"],
                     attention_mask=batch_inputs["attention_mask"],
                     max_new_tokens=max_new_tokens,
@@ -251,7 +255,7 @@ class PPOAgent:
             gen_only_ids = gen.sequences[:, input_len:]
             completions = self.tokenizer.batch_decode(gen_only_ids, skip_special_tokens=True)
         return completions
-
+    
     # ---- Loop de antrenare ----
     def train(self, dataloader):
         step = 0
@@ -286,9 +290,9 @@ class PPOAgent:
                 input_ids, attention_mask, labels = tok["input_ids"], tok["attention_mask"], tok["labels"]
 
                 # 2) Old logprobs/policy + old values (no_grad) și ref_logprobs (no_grad)
-                with torch.no_grad():
-                    amp_enabled = torch.cuda.is_available()
-                    with autocast(device_type="cuda" if amp_enabled else "cpu", enabled=amp_enabled):
+                with torch.inference_mode():
+                    with autocast(device_type="cuda" if self.amp_enabled else "cpu", 
+                                    dtype=self.autocast_dtype, enabled=self.amp_enabled):
                         # a) old policy (freeze current policy pentru rollouts)
                         old_logits, old_values_ = self.policy_model(input_ids, attention_mask, labels)
                         # b) modelul de referință (doar pentru shaping KL_ref)
@@ -318,7 +322,7 @@ class PPOAgent:
                     answers=batch["solution"])
                 raw_rewards = raw_sentiment_rewards + raw_fn_rewards
                 rewards = (raw_rewards - raw_rewards.mean()) / (raw_rewards.std() + 1e-8)
-                rewards = raw_rewards.clamp(-5.0, 5.0)
+                rewards = rewards.clamp(-5.0, 5.0)
              
                 # estimate next values for GAE (shift by one; placeholder)
                 nv = torch.cat([raw_rewards.new_tensor([0.0]), old_values[:-1]])  # shift
@@ -388,11 +392,8 @@ class PPOAgent:
                         mb_next_values         = next_values[start:end]
                         mb_dones               = dones[start:end]
 
-                        if torch.cuda.is_available():
-                            device_type = "cuda"; amp_enabled = True
-                        else:
-                            device_type = "cpu";  amp_enabled = False
-                        with autocast(device_type=device_type, enabled=amp_enabled):
+                        with autocast(device_type="cuda" if self.amp_enabled else "cpu", 
+                                        dtype=self.autocast_dtype, enabled=self.amp_enabled):
                             logits, values = self.policy_model(mb_input_ids, mb_attention_mask, mb_labels)
                             new_logprobs = self.compute_logprobs(logits, mb_labels)
                             loss, pol_loss, val_loss, kl_ref_signed, entropy, kl_ref_abs = self.ppo_loss(
