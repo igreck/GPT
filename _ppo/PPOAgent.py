@@ -75,7 +75,7 @@ class PPOAgent:
         self.neg_idx = inv.get("negative", 0 if self.pos_idx != 0 else 1)
 
         # AMP scaler & TB
-        self.scaler = GradScaler()
+        self.scaler = GradScaler(enabled=self.amp_enabled)
         self.writer = SummaryWriter(log_dir=self.cfg.log_dir)
         self.best_reward = -float("inf")
         self.no_improve_epochs = 0
@@ -127,10 +127,8 @@ class PPOAgent:
         denom = mask.sum(dim=1).clamp_min(1)
         return (ent * mask).sum(dim=1) / denom      # [B]
 
-    def compute_kl_divergence(self, new_logprobs: torch.Tensor, ref_logprobs: torch.Tensor) -> torch.Tensor:
-        """Δlogp mediu pe token (semnat) — pentru logging; ABS-ul se penalizează."""
-        return (new_logprobs - ref_logprobs).mean()
 
+    # INFO: Neutilizat (un GAE - Artificial pe batch)
     def compute_advantages(
         self,
         rewards: torch.Tensor,
@@ -214,9 +212,8 @@ class PPOAgent:
             prompt_ids = batch_inputs["input_ids"][i, -plen:].to(self.device)
 
             cids = comp_tok[i]
-            if len(cids) == 0 or (eos_id is not None and cids[-1] == eos_id) is False:
-                if eos_id is not None:
-                    cids = cids + [eos_id]
+            if eos_id is not None and (len(cids) == 0 or cids[-1] != eos_id):
+                cids = cids + [eos_id]
             cids_t = torch.tensor(cids, dtype=torch.long, device=self.device)
 
             merged = torch.cat([prompt_ids, cids_t], dim=0)
@@ -303,16 +300,11 @@ class PPOAgent:
         values: torch.Tensor,
         old_values: torch.Tensor,
         logits: torch.Tensor,
-        mask: torch.Tensor,                  # comp_mask (1 pe completare)
-        next_values: Optional[torch.Tensor] = None,
-        dones: Optional[torch.Tensor] = None
+        mask: torch.Tensor                   # comp_mask (1 pe completare)
     ) -> tuple:
-        # GAE sau 1-step
-        if next_values is not None and dones is not None:
-            advantages = self.compute_advantages(rewards, values, next_values, dones)
-        else:
-            advantages = rewards - values.detach()
-        # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # Bandit: un singur reward pe secvență
+        advantages = rewards - values.detach()
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Entropie pe completare & KL_ref
         entropy = self.compute_entropy(logits, mask.float()).mean()
@@ -352,6 +344,9 @@ class PPOAgent:
         final_clip   = self.final_clip_epsilon
 
         for epoch in range(self.cfg.n_epochs):
+            self.policy_model.train()
+            self.policy_ref.eval()
+            self.reward_model.eval()
             epoch_loss = epoch_policy = epoch_value = epoch_kl = epoch_entropy = epoch_reward = 0.0
             n_batches = 0
 
@@ -374,7 +369,6 @@ class PPOAgent:
                 input_ids, attention_mask, labels, comp_mask = (
                     cat["input_ids"], cat["attention_mask"], cat["labels"], cat["comp_mask"]
                 )
-                check_cat = self.tokenizer.batch_decode(cat["input_ids"])
 
                 clean_completions = completions  # textul pur al completărilor
 
@@ -416,9 +410,6 @@ class PPOAgent:
                 rewards = (raw_rewards - raw_rewards.mean()) / (raw_rewards.std() + 1e-8)
                 rewards = rewards.clamp(-5.0, 5.0)
 
-                # 5) next_values / dones pentru GAE (shift simplu)
-                nv = torch.cat([raw_rewards.new_tensor([0.0], device=self.device), old_values[:-1]])
-                dones = torch.zeros_like(raw_rewards)
 
                 # logging per-exemplu
                 if step % getattr(self.cfg, "log_every", 50) == 0:
@@ -471,7 +462,7 @@ class PPOAgent:
                 def ppo_update_pass(
                     input_ids, attention_mask, labels,
                     old_policy_logprobs, ref_logprobs,
-                    rewards, old_values, next_values, dones,
+                    rewards, old_values,
                     comp_mask
                 ):
                     mb_B = input_ids.size(0)
@@ -489,8 +480,6 @@ class PPOAgent:
                         mb_ref_logprobs        = ref_logprobs[start:end]
                         mb_rewards             = rewards[start:end]
                         mb_old_values          = old_values[start:end]
-                        mb_next_values         = next_values[start:end]
-                        mb_dones               = dones[start:end]
 
                         with autocast(
                             device_type="cuda" if self.amp_enabled else "cpu",
@@ -503,8 +492,7 @@ class PPOAgent:
                             loss, pol_loss, val_loss, kl_ref_signed, entropy, kl_ref_abs = self.ppo_loss(
                                 mb_old_policy_logprobs, new_logprobs, mb_ref_logprobs,
                                 mb_rewards, values, mb_old_values,
-                                logits, mb_comp_mask,
-                                next_values=mb_next_values, dones=mb_dones
+                                logits, mb_comp_mask
                             )
 
                             loss = loss / accum_steps
@@ -547,16 +535,11 @@ class PPOAgent:
                     buffer_old_values     = torch.cat([b["old_values"] for b in batch_samples], dim=0).to(self.device)
                     buffer_ref_logprobs   = torch.cat([b["ref_logprobs"] for b in batch_samples], dim=0).to(self.device)
                     buffer_rewards        = torch.cat([b["rewards"] for b in batch_samples], dim=0).to(self.device)
-                    buffer_next_values    = torch.cat([
-                        torch.cat([b["rewards"].new_tensor([0.0], device=self.device), b["old_values"].to(self.device)[:-1]])
-                        for b in batch_samples
-                    ], dim=0)
-                    buffer_dones = torch.zeros_like(buffer_rewards)
 
                     _ = ppo_update_pass(
                         buffer_input_ids, buffer_attention_mask, buffer_labels,
                         buffer_old_policy_logprobs, buffer_ref_logprobs,
-                        buffer_rewards, buffer_old_values, buffer_next_values, buffer_dones,
+                        buffer_rewards, buffer_old_values,
                         comp_mask=buffer_comp_mask
                     )
 
@@ -573,7 +556,7 @@ class PPOAgent:
                     losses, pols, vals, kls_signed, ents, kls_abs = ppo_update_pass(
                         input_ids, attention_mask, labels,
                         old_policy_logprobs, ref_logprobs,
-                        rewards, old_values, nv, dones,
+                        rewards, old_values,
                         comp_mask=comp_mask
                     )
 
