@@ -1,5 +1,5 @@
 #models
-models/
+# models/
 
 #cache unsloth
 unsloth_compiled_cache/

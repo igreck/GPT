@@ -407,8 +407,8 @@ class PPOAgent:
                 raw_rewards = (raw_sentiment_rewards + raw_fn_rewards).to(self.device)
 
                 # Normalizare stabilă
-                rewards = (raw_rewards - raw_rewards.mean()) / (raw_rewards.std() + 1e-8)
-                rewards = rewards.clamp(-5.0, 5.0)
+                # rewards = (raw_rewards - raw_rewards.mean()) / (raw_rewards.std() + 1e-8)
+                rewards = raw_rewards.clamp(-5.0, 5.0)
 
 
                 # logging per-exemplu
