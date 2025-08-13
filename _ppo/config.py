@@ -74,7 +74,7 @@ class Config:
         self.seed = 42
 
         # === Logging / saving ===
-        self.log_every = 10
+        self.log_every = 1
         self.log_interval = self.log_every
         self.save_every = 5
         self.log_dir = f"runs/ppo_math_{self.timestamp}"
