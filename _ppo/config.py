@@ -98,4 +98,4 @@ class Config:
         # === Replay buffer & micro-batching pe număr de tokeni ===
         self.buffer_size = 100              # mărimea bufferului de replay
         self.replay_batch_size = 16         # câte mostre tragi pentru off-policy update
-        self.token_microbatch_size = 8000   # ținta de tokeni / micro-batch
+        self.token_microbatch_size = 3000   # ținta de tokeni / micro-batch

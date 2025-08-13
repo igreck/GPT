@@ -312,7 +312,7 @@ class PPOAgent:
             advantages = self.compute_advantages(rewards, values, next_values, dones)
         else:
             advantages = rewards - values.detach()
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Entropie pe completare & KL_ref
         entropy = self.compute_entropy(logits, mask.float()).mean()
