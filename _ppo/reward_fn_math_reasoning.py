@@ -16,21 +16,21 @@ class RewardFunctions:
         self.solution_start  = "<SOLUTION>"
         self.solution_end    = "</SOLUTION>"
  
-        # Add optional EOS token matching
-        self.solution_end_regex = r"</SOLUTION>[\s]{0,}" + \
-            "(?:" + re.escape(self.tokenizer.eos_token) + ")?"
+        # Add optional EOS token matching (safe if eos_token is None)
+        eos = self.tokenizer.eos_token or ""
+        self.solution_end_regex = r"</SOLUTION>[\s]{0,}(?:" + re.escape(eos) + ")?"
 
-        self.match_format = re.compile(
-            rf"{self.reasoning_end}.*?"
-            rf"{self.solution_start}(.+?){self.solution_end_regex}"\
-            rf"[\s]{{0,}}$",
-            flags = re.MULTILINE | re.DOTALL
+        # Define a tolerant solution block: <SOLUTION> ... </SOLUTION> anchored near the end
+        self.solution_block = re.compile(
+            r"<SOLUTION>(.+?)" + self.solution_end_regex + r"[\s]{0,}$",
+            flags=re.MULTILINE | re.DOTALL,
         )
 
-        self.match_numbers = re.compile(
-            self.solution_start + r".*?[\s]{0,}([-]?[\d\.\,]{1,})",
-            flags = re.MULTILINE | re.DOTALL
-        )
+        # For backward compatibility, keep match_format pointing to solution_block
+        self.match_format = self.solution_block
+
+        # (kept for reference, but check_numbers will extract from solution_block)
+        self.match_numbers = re.compile(r"[-]?[\d\.,]+")
 
     def match_format_exactly(self, completions, **kwargs):
         scores = []
@@ -60,65 +60,63 @@ class RewardFunctions:
         return scores
 
     def check_answer(self, prompts, completions, answer, **kwargs):
-        question = prompts[1]["content"]
         responses = completions
-
+        # extract inner solution text
         extracted_responses = [
-            guess.group(1)
-            if (guess := self.match_format.search(r)) is not None else None \
+            (m.group(1) if (m := self.solution_block.search(r)) is not None else None)
             for r in responses
         ]
-
         scores = []
         for guess, true_answer in zip(extracted_responses, answer):
-            score = 0
+            score = 0.0
             if guess is None:
                 scores.append(-2.0)
                 continue
-            # Correct answer gets 5 points!
+            # strict match
             if guess == true_answer:
                 score += 5.0
-            # Match if spaces are seen, but less reward
-            elif guess.strip() == true_answer.strip():
+            # whitespace-insensitive
+            elif guess.strip() == str(true_answer).strip():
                 score += 3.5
             else:
-                # We also reward it if the answer is close via ratios!
-                # Ie if the answer is within some range, reward it!
+                # numeric tolerance if both parse
                 try:
                     ratio = float(guess) / float(true_answer)
-                    if   ratio >= 0.9 and ratio <= 1.1: score += 2.0
-                    elif ratio >= 0.8 and ratio <= 1.2: score += 1.5
-                    else: score -= 2.5 # Penalize wrong answers
-                except:
-                    score -= 4.5 # Penalize
+                    if 0.9 <= ratio <= 1.1:
+                        score += 2.0
+                    elif 0.8 <= ratio <= 1.2:
+                        score += 1.5
+                    else:
+                        score -= 2.5
+                except Exception:
+                    score -= 4.5
             scores.append(score)
         return scores
 
 
 
     def check_numbers(self, prompts, completions, answer, **kwargs):
-        question = prompts[1]["content"]
         responses = completions
-
-        extracted_responses = [
-            guess.group(1)
-            if (guess := self.match_numbers.search(r)) is not None else None \
+        # extract inner solution text
+        inners = [
+            (m.group(1) if (m := self.solution_block.search(r)) is not None else None)
             for r in responses
         ]
-
         scores = []
-        for guess, true_answer in zip(extracted_responses, answer):
-            if guess is None:
+        for inner, true_answer in zip(inners, answer):
+            if inner is None:
                 scores.append(-2.5)
                 continue
-            # Convert to numbers
             try:
-                true_answer = float(true_answer.strip())
-                # Remove commas like in 123,456
-                guess       = float(guess.strip().replace(",", ""))
-                scores.append(3.5 if guess == true_answer else -1.5)
-            except:
-                scores.append(0)
+                true_val = float(str(true_answer).strip())
+                m = self.match_numbers.search(inner)
+                if not m:
+                    scores.append(0.0)
+                    continue
+                guess_val = float(m.group(0).strip().replace(",", ""))
+                scores.append(3.5 if guess_val == true_val else -1.5)
+            except Exception:
+                scores.append(0.0)
                 continue
         return scores
 
@@ -142,6 +140,9 @@ class RewardFunctions:
         """
         B = len(completions)
         device = device or getattr(self, "device", None) or "cpu"
+
+        if answers is not None:
+            answers = [str(a) for a in answers]
 
         # --- component scores ---
         exact_fmt = self.match_format_exactly(completions, **kwargs)
@@ -191,4 +192,3 @@ class RewardFunctions:
         if return_components:
             return total, comps  # total: [B], comps: dict[str, Tensor[B]]
         return total  # Tensor[B]
-

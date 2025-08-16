@@ -23,29 +23,29 @@ class Config:
                        else "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
                        else "cpu")
         # self.reward_device = self.device
-        self.reward_device = "cpu"
+        self.reward_device = self.device
 
         # value head dim (pentru PPO)
         self.value_hidden_dim = 512
 
         # === PPO / RLHF terms ===
         self.value_loss_weight = 0.3
-        self.entropy_weight = 0.005  # puțin mai mic decât 0.02
-        self.clip_epsilon = 0.3
+        self.entropy_weight = 0.0  # start stabil, crește dinamic cu scheduler
+        self.clip_epsilon = 0.10
         self.clip_epsilon_final = 0.05  # scheduling liniar pe parcursul epocilor PPO
+        self.reward_scale = 3.0            # factor global de scalare a reward-ului normalizat (mărește amplitudinea avantajului)
 
-        # coeficient pentru penalizarea față de modelul de referință
-        # (se aplică pe |Δlogp| mediu per token)
-        self.target_kl = 0.15
-        self.kl_coef = 0.2
+        # coeficient pentru penalizarea față de modelul de referință (forward-KL token-level)
+        self.target_kl = 0.06
+        self.kl_coef = 0.20
         self.kl_adapt_rate = 1.5
-        self.kl_window = 50
-        self.max_kl_coef = 1.0
+        self.kl_window = 32
+        self.max_kl_coef = 0.2
         self.min_kl_coef = 1e-4
-        self.kl_stop_factor = 1.5  # early-stop epocă PPO dacă |Δ| depășește factor * target
+        self.kl_stop_factor = 1.2  # oprește mai devreme când KL sare de target
 
         # Value clipping
-        self.value_clip_range = 0.3
+        self.value_clip_range = 0.2
 
         # === Train (batching) ===
         self.n_epochs = 6
@@ -57,10 +57,10 @@ class Config:
         self.warmup_steps = 500
 
         # === Generation ===
-        self.max_new_tokens = 1024
-        self.top_p = 0.9
-        self.temperature = 0.5
-        self.repetition_penalty = 1.1
+        self.max_new_tokens = 1024  # mai lung pentru a prinde <SOLUTION>…</SOLUTION>
+        self.top_p = 0.75
+        self.temperature = 0.25
+        self.repetition_penalty = 1.15
 
         # === Lengths ===
         self.policy_max_length = 2048
@@ -74,7 +74,7 @@ class Config:
         self.seed = 42
 
         # === Logging / saving ===
-        self.log_every = 1
+        self.log_every = 10
         self.log_interval = self.log_every
         self.save_every = 5
         self.log_dir = f"runs/ppo_math_{self.timestamp}"
@@ -93,9 +93,10 @@ class Config:
         self.add_length_bonus = True
         self.min_words_bonus = 8
         self.length_bonus = 0.1
-        self.diversity_coef = 0.2         # bonus de diversitate (bigram overlap)
+        self.diversity_coef = 0.05        # bonus mic de diversitate (bigrame unice) – nu sabota concizia
 
         # === Replay buffer & micro-batching pe număr de tokeni ===
         self.buffer_size = 100              # mărimea bufferului de replay
         self.replay_batch_size = 16         # câte mostre tragi pentru off-policy update
         self.token_microbatch_size = 3000   # ținta de tokeni / micro-batch
+        self.format_warmup_steps = 300  # număr de pași PPO cu accent pe format înainte de răspuns corect
