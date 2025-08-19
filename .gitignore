@@ -6,8 +6,8 @@ unsloth_compiled_cache/
 unsloth_training_checkpoints/
 
 #logs and runs
-logs/
-runs/
+# logs/
+# runs/
 eval_out_sft/
 
 # Byte-compiled / optimized / DLL files

@@ -1,0 +1,5 @@
+{
+  "class": "PPOQLoRAWithValueHead",
+  "base_model_name": "Qwen/Qwen3-4B-Base",
+  "hidden_size": 2560
+}
